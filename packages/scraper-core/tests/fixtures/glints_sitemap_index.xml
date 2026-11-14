@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- FIXTURE BUATAN — sitemap index Glints (contoh struktur).
+     Hanya <loc> lowongan yang cocok pola /opportunities/jobs/<slug>/<uuid>
+     yang boleh lolos parse_sitemap; sisanya disaring. -->
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap><loc>https://glints.com/sitemaps/jobs-id-1.xml</loc></sitemap>
+</sitemapindex>

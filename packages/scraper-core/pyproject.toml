@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cekloker-scraper-core"
+version = "0.1.0"
+description = "Kontrak adapter + parser scraper job board untuk CekLoker (Fase 1)"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["scraper_core*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

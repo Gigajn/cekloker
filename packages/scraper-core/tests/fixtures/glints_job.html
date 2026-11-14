@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<!-- FIXTURE BUATAN (bukan salinan halaman asli Glints).
+     Meniru STRUKTUR halaman detail Glints: JSON-LD JobPosting + teks
+     "Posted 2 days ago" + gaji IDR + penanda halaman aktif.
+     Perusahaan "PT Contoh Maju Bersama" adalah FIKTIF. -->
+<html lang="id">
+<head>
+  <title>Staff Programmer Jobs at PT Contoh Maju Bersama, Jakarta | Glints</title>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "JobPosting",
+    "title": "Staff Programmer",
+    "description": "Membangun dan merawat aplikasi internal perusahaan.",
+    "datePosted": "2026-11-13",
+    "hiringOrganization": {"@type": "Organization", "name": "PT Contoh Maju Bersama"},
+    "jobLocation": {"@type": "Place", "address": {"addressLocality": "Jakarta"}},
+    "baseSalary": {"@type": "MonetaryAmount", "currency": "IDR",
+      "value": {"@type": "QuantitativeValue", "minValue": 5000000, "maxValue": 8000000, "unitText": "MONTH"}}
+  }
+  </script>
+</head>
+<body>
+  <h1>Staff Programmer</h1>
+  <p>PT Contoh Maju Bersama</p>
+  <p>IDR 5.000.000 - 8.000.000 / Month</p>
+  <p>Posted 2 days ago</p>
+  <p>Jakarta · On-site · Full-time</p>
+</body>
+</html>
