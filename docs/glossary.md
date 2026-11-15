@@ -18,6 +18,9 @@
 | **repost** | Lowongan yang sama diposting ulang dengan URL/ID baru sehingga tanggalnya terlihat baru. Dideteksi lewat `fingerprint` (judul + perusahaan + lokasi sama), bukan lewat ID/URL. |
 | **evergreen (jabatan bergulir)** | Jabatan yang lowongannya wajar selalu buka karena turnover tinggi (sales, driver, kurir, telemarketing, dsb.). Tidak pernah dihitung sebagai ghost job. |
 | **lowongan basi (staleness)** | Lowongan yang masih tayang tapi sebenarnya sudah terisi/tidak aktif (tayang > 30–90 hari tanpa perubahan). CekLoker memangkasnya dari daftar aktif. |
+| **shell SPA** | Halaman web yang isinya hanya kerangka kosong (~2 KB: judul generik + 1 tag script) — data aslinya baru dimuat JavaScript setelah halaman dibuka di browser. Scraper stdlib (urllib, tanpa JS) TIDAK BISA membaca data dari shell SPA. Ditemukan live di Kalibrr 15 Nov 2026: pencarian mengembalikan HTTP 200 berupa shell tanpa `__NEXT_DATA__`. Bukan berarti "0 lowongan" — adapter harus gagal jujur (`SourceFetchError`), bukan mengembalikan kosong. |
+| **validThrough** | Field JSON-LD `JobPosting` (schema.org): tanggal terakhir lowongan masih valid. Setelah tanggal itu lewat, lowongan dianggap tidak buka lagi. Dipakai Glints sebagai sinyal kedua status aktif (di samping penanda tutup di teks tampil) sejak uji live 15 Nov 2026. |
+| **false positive (penanda tutup)** | Penanda "tutup" yang terdeteksi padahal lowongan masih buka. Contoh live Glints 15 Nov 2026: frasa "lowongan ini sudah ditutup" ada di bundel terjemahan i18n di dalam `<script>` SEMUA halaman detail, sehingga adapter lama menandai semua lowongan Glints sebagai tutup. Perbaikan: penanda hanya dicari di teks tampil (di luar `<script>`/`<style>`). |
 | **Green / Mixed / Red flag** | Label ringkas dari skor total ternormalisasi: Green 70–100, Mixed 40–69, Red 0–39. Label adalah **ringkasan sinyal publik, bukan vonis** — selalu disertai rincian per sinyal + tautan bukti, dan disclaimer bahwa ini bukan penilaian hukum. |
 | **Belum cukup data** | Label bila sinyal penentu < 3 atau kategori penentu < 2. Artinya "kami belum tahu", bukan "perusahaan ini buruk". Perusahaan baru yang bagus akan sering mendapat label ini — dan itu benar. |
 
@@ -54,12 +57,16 @@
 | **bukti (evidence)** | Tautan + tanggal + sumber + (bila diizinkan) kutipan singkat yang menopang satu sinyal. Bukti yang kedaluwarsa (> 12–24 bulan, tergantung jenisnya) kehilangan hak memberi poin. |
 | **confidence** | Tingkat kepercayaan pada satu sinyal: `high` (bukti langsung + n besar), `medium` (memenuhi ambang minimum), `low` (konteks saja / n kecil / satu sumber). Confidence bukan poin — ia menjelaskan seberapa serius pembaca boleh menganggap sinyal itu. |
 | **sinyal penentu (decisive)** | Sinyal yang cukup kuat untuk dihitung dalam penentuan label "Belum cukup data": rating n ≥ 5, rekomendasi n ≥ 20, keluhan/berita/ghost job yang benar-benar memberi poin, dan fee yang terbukti. Konteks tanpa poin bukan penentu. |
-| **total ternormalisasi** | Skor 0–100 yang dihitung hanya dari kategori yang sudah terukur (`100 × perolehan / cap kategori terukur`), supaya "data belum diukur" tidak disamakan dengan "data buruk". Perubahan dari penjumlahan mentah ARCH §5 — lihat ADR-0005; butuh persetujuan Giga (D7). |
+| **total ternormalisasi** | Skor 0–100 yang dihitung hanya dari kategori yang sudah terukur (`100 × perolehan / cap kategori terukur`), supaya "data belum diukur" tidak disamakan dengan "data buruk". Disetujui Giga 15 Nov 2026 (D7) — lihat ADR-0005 Amandemen D7. Bila 0 kategori terukur, total tidak ada (None), bukan 0. |
+| **cap terukur** | Jumlah cap kategori yang sudah punya sinyal penentu — penyebut rumus total ternormalisasi. Mis. reputasi (25) + stabilitas (20) terukur → cap terukur 45. Kategori tanpa sinyal penentu tidak dihitung, betapa pun banyak sinyal konteksnya. |
+| **kategori penentu** | Kategori yang punya ≥ 1 sinyal penentu (`decisive`). Label Green/Mixed/Red baru diberikan bila ada ≥ 2 kategori penentu (dan ≥ 3 sinyal penentu). |
 | **cap kategori** | Batas poin per kategori (Reputasi 25, Transparansi 25, Stabilitas 20, Praktik rekrutmen 15, Gaji & benefit 15). Satu kategori tidak boleh mendominasi total tanpa batas. |
 | **keluhan berulang** | Keluhan dengan isi yang sama (satu cluster kata kunci) yang muncul di ≥ 3 ulasan berbeda. Satu ulasan marah bukan keluhan berulang, sepedas apa pun isinya. |
 | **cluster keluhan** | Satu jenis keluhan (mis. `gaji_telat_atau_ditahan`) yang mencakup beberapa pola kata kunci Indonesia + Inggris. Satu ulasan dihitung sekali per cluster. |
 | **konteks (tanpa poin)** | Informasi yang ditampilkan ke pengguna tanpa memengaruhi skor: thread forum, post media sosial, satu ulasan ekstrem, satu artikel berita. Konteks membantu pengguna menilai sendiri; ia tidak boleh menyamar sebagai penilaian sistem. |
 | **red override** | Pemicu yang langsung membuat label jadi Red + peringatan, apa pun skor lainnya. Saat ini hanya satu: terbuktinya permintaan biaya dalam teks lowongan. Override tidak bisa "ditebus" oleh poin positif. |
+| **data contoh (mock)** | Data lowongan/perusahaan buatan yang dipakai web (`apps/web/src/lib/mock.ts`) hanya bila API belum bisa dijangkau. Selalu ditandai spanduk "Data contoh (mock)" di halaman — bukan data nyata dan tidak boleh diklaim sebagai lowongan sungguhan. |
+| **skor ternormalisasi (tampilan web)** | Skor 0–100 yang ditampilkan web, dihitung API hanya dari kategori yang sudah terukur (`100 × perolehan / cap kategori terukur`). Web tidak menghitung ulang skor — ia hanya menampilkan `score`/`label` dari API; bila `score` null, web menampilkan "Belum cukup data" tanpa angka. Lihat ADR-0009 W4. |
 | **entri manual** | Pencatatan data oleh manusia (Giga) dari halaman publik yang dibaca biasa — cara pengambilan data ulasan yang diizinkan Fase 2, karena pengambilan otomatis dilarang ToS sumber (K-S1/K-S2). |
 | **izin tertulis (express written permission)** | Persetujuan eksplisit dari pemilik platform untuk pengambilan data otomatis. Syarat yang ditulis Glassdoor/Indeed/Reddit/Kaskus. Visibilitas publik **bukan** izin. |
 
@@ -85,3 +92,16 @@
 | **snapshot tren** | Commit otomatis harian yang hanya mencatat angka (mis. jumlah lowongan per platform). Bukan pengembangan fitur — jangan dibaca sebagai bukti repo aktif dikembangkan. |
 | **TLS impersonation** | Teknik meniru "sidik jari" TLS browser asli (mis. Chrome) agar server mengira request datang dari browser manusia. Tergolong teknik mengelabui deteksi bot. Dilarang di CekLoker. |
 | **dedup (deduplikasi)** | Menghapus lowongan yang sama yang muncul di beberapa sumber, memakai fingerprint. |
+
+## API, database & worker (Fase 1-lanjutan, ADR-0009)
+
+| Istilah | Definisi |
+|---|---|
+| **missed_checks** | Penghitung kunjungan hilang berturut-turut per lowongan (kolom `jobs.missed_checks`). Naik 1 tiap `check_active` False; direset 0 bila lowongan terlihat buka lagi. Lowongan baru jadi `closed` bila penghitung ini mencapai 2 (aturan 2x, ARCH §3). |
+| **kunjungan hilang (missed)** | Satu kunjungan ulang worker yang tidak menemukan lowongan masih buka. Dicatat di `job_snapshots` dengan status `missed` — belum berarti tutup, baru dihitung. |
+| **refresh (admin)** | Operasi `POST /api/v1/admin/refresh`: memicu worker mengecek ulang lowongan aktif (butuh login admin). Sinkron + berbatas (default 20, maks 100 lowongan per panggilan) di v1 — bukan antrean. |
+| **sesi admin (admin session)** | Baris di `admin_sessions`: token login acak yang sudah di-hash (SHA-256) + waktu kedaluwarsa (7 hari). Token bisa dicabut dengan menghapus barisnya; token mentah hanya terlihat sekali, saat login. |
+| **skor fallback (engine fallback)** | Jalur darurat `services/scoring.py`: bila modul flag-engine tidak bisa diimpor, skor dihitung dengan rumus lokal yang SAMA dengan ADR-0005 dan hasilnya ditandai `engine="fallback"` supaya ketahuan — bukan sumber kebenaran kedua. |
+| **board_url** | URL board ATS / halaman karier asal satu lowongan (kolom `jobs.board_url`, mis. `https://boards.greenhouse.io/contohcorp`). Dipakai worker untuk menghidupkan `CareerPageAdapter` saat recheck; bila kosong, recheck lowongan itu `skipped`. |
+| **seed** | Skrip `apps/api/scripts/seed.py`: mengisi database dari fixture buatan Fase 1 (parser PURE atas fixture, perusahaan FIKTIF) + akun admin dari env. Bukan data live massal, bukan data pribadi. Idempotent (upsert per `source_url`). |
+| **migrasi 001_init.sql** | File SQL PostgreSQL yang membuat seluruh skema awal (cerminan ARCH §4 + ADR-0009). Dipilih atas Alembic untuk v1 — satu file yang bisa direview langsung; pindah ke Alembic bila skema berubah > 2-3x. |

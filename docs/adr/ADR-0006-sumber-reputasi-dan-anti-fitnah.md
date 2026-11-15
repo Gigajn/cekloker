@@ -131,6 +131,65 @@ dipakai, dengan cara apa, dan pagar anti-fitnah/privasi apa yang berlaku.
   skema `signals.evidence_text` harus membolehkan kosong untuk sumber
   Google (K-S3).
 
+## Amandemen K4 — 2026-11-15 (Fase 1-lanjutan, tim Normalisasi + Flag-Engine)
+
+**Keputusan asal (K4, konsolidasi Fase 1):** `evidence_text` boleh null;
+untuk sumber `google_places` wajib kosong (hanya rating, jumlah,
+`place_id`, tautan). Amandemen ini menetapkan BAGAIMANA aturan itu
+ditegakkan di kode, bukan hanya di dokumen.
+
+### Yang diterapkan di `packages/flag-engine/social_signals.py`
+
+1. **`Signal.evidence_text` bertipe `str | None`.** Null berarti "tidak
+   ada kutipan" — dipertahankan sebagai None, bukan diubah diam-diam
+   jadi `""`, supaya model/skema membedakan "kutipan tidak diberikan"
+   dari "kutipan kosong". Skema DB di ARCHITECTURE.md §4 sudah menulis
+   `evidence_text text` tanpa NOT NULL, jadi tidak ada perubahan skema —
+   yang berubah hanya penegakannya di flag-engine.
+2. **Validasi keras di `Signal.__post_init__`:** sinyal dengan
+   `source == "google_places"` dan `evidence_text` terisi (setelah
+   di-strip) melempar `ValueError` — DITOLAK, bukan diam-diam dikosongkan.
+   Alasan grill (G-K4-1): pengosongan diam-diam menyembunyikan bug
+   pemanggil dan membuat pelanggaran Places API Policies lolos tanpa
+   jejak; penolakan keras memaksa perbaikan di sumber datanya.
+   Kosong yang diterima: `None`, `""`, atau hanya spasi.
+3. **Semua fungsi pembentuk sinyal** (`score_rating`,
+   `score_recommend_rate`, `score_news_event`) menerima
+   `evidence_text: str | None` dan meneruskannya apa adanya (None tetap
+   None; string dipotong ke 280 karakter).
+4. **`detect_complaints` TIDAK BOLEH dipanggil dengan
+   `source="google_places"`** — fungsi ini membangun kutipan dari teks
+   ulasan, dan bila ada keluhan yang cocok, `Signal` menolak keras.
+   Ini benar: teks ulasan Google memang tidak boleh disimpan dalam
+   bentuk apa pun, termasuk sebagai kutipan keluhan.
+
+### Hasil grill K4
+
+- **G-K4-1 — Tolak (raise) atau buang (kosongkan)?** Dipilih TOLAK.
+  Modul ini sudah menganut filosofi "gagal keras" untuk bukti kosong
+  (`_require_evidence`), jadi penolakan konsisten. Risiko: data lama
+  yang keliru membawa teks Google akan gagal diproses sampai dibersihkan
+  — itu memang tujuannya, bukan efek samping. **Berubah:** validasi di
+  `__post_init__`, bukan di pemanggil.
+- **G-K4-2 — Kenapa validasi di `Signal`, bukan di tiap fungsi?**
+  Supaya tidak ada jalur yang lolos: sinyal yang dibangun langsung
+  (mis. dari modul lain di Fase 2) ikut terjaring. Satu titik penegakan,
+  bukan empat. **Berubah:** `__post_init__` sebagai satu-satunya pagar.
+- **G-K4-3 — Apakah `place_id` ikut disimpan?** Ya — `place_id` adalah
+  satu-satunya field yang dikecualikan Places API Policies dari larangan
+  simpan. Tapi `Signal` v1 tidak punya field `place_id`; penyimpanan
+  `place_id` menjadi urusan lapisan pengumpul data + skema DB Fase 2,
+  bukan modul ini. Yang ditegakkan modul ini hanyalah: tidak ada teks
+  ulasan yang lolos lewat `evidence_text`.
+
+### Tindak lanjut (di luar modul ini)
+
+- Skema DB Fase 2 wajib mempertahankan `signals.evidence_text` NULLABLE
+  dan sebaiknya menambahkan CHECK (`source='google_places'` →
+  `evidence_text IS NULL`) sebagai pagar kedua di database.
+- UI yang menampilkan teks ulasan Google harus mengambilnya live dari
+  API saat halaman dibuka (dengan atribusi + logo), bukan dari database.
+
 ## Hasil grill yang mengubah keputusan
 
 - **G-3 (ulasan ekstrem/palsu):** memaksa aturan 9–11 — ambang jumlah +

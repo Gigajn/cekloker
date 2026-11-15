@@ -200,7 +200,18 @@ signals (
 
 ### Skor v1: rule-based dulu (bukan AI dulu)
 
-Total 100 poin. AI / sentimen ML baru Fase 4, setelah rule-based terbukti berguna.
+Total skor DINORMALISASI terhadap kategori yang sudah terukur
+(D7, disetujui Giga 15 Nov 2026 — lihat ADR-0005 Amandemen D7; rumus
+penjumlahan mentah tidak lagi berlaku):
+
+    total = 100 × perolehan / cap terukur
+
+dengan *cap terukur* = jumlah cap kategori yang punya sinyal penentu
+(mis. hanya reputasi 25 + stabilitas 20 yang terukur → cap terukur 45,
+bukan 100). Kategori yang belum terukur tidak masuk penyebut — "belum
+diukur" tidak disamakan dengan "buruk". Bila 0 kategori terukur, total
+tidak ada (None), bukan 0 — labelnya "Belum cukup data". AI / sentimen
+ML baru Fase 4, setelah rule-based terbukti berguna.
 
 | Kategori (bobot) | Sinyal contoh (v1) | Green (+) | Red (−) |
 |---|---|---|---|

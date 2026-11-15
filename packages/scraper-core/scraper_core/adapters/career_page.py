@@ -33,11 +33,30 @@ Status verifikasi (15 Nov 2026, lihat docs/fase1-riset-direct.md):
   * `posted_at` TIDAK sama dengan `first_seen_at`. Lihat docstring
     `parse_*` untuk apa arti tanggal tiap platform — Ashby `publishedAt`
     artinya "terakhir dipublikasikan", BUKAN pertama kali dibuka.
+
+UJI LIVE 15 Nov 2026 (lihat docs/fase1-lanjutan-uji-live.md):
+  * Greenhouse board "discord": 26 lowongan, `first_published` ADA di
+    daftar untuk 26/26 — asumsi K-D1 ("hanya di endpoint satu job")
+    ternyata TIDAK BERLAKU di data live; fallback satu job tetap ada
+    untuk board yang tidak menyertakannya.
+  * Lever board "spotify": 87 lowongan, `createdAt` (epoch ms) ADA di
+    87/87 — K-D2 TERJAWAB: field itu nyata di respons live meski tidak
+    ada di tabel README resmi.
+  * Ashby board "ashby": 76 lowongan, `publishedAt` ADA; lowongan
+    pertama terdaftar punya publishedAt 2024-03-04 (sudah >1,5 tahun)
+    — bukti langsung K-D3: publishedAt = terakhir dipublikasikan,
+    bukan tanggal buka; jangan tampilkan sebagai tanggal buka pasti.
+  * Workable board "huggingface": 6 lowongan, `published_on` tanggal
+    saja (YYYY-MM-DD), mis. 2026-05-29.
+  * GoTo Indonesia BUKAN di Lever: `api.lever.co/v0/postings/goto`
+    -> HTTP 404 — klaim MulaJob (K-D5) TERBANTAH. Board Lever milik
+    Lever sendiri (slug "lever") mengembalikan 200 dengan 0 lowongan
+    — board kosong TIDAK sama dengan "perusahaan tidak merekrut"
+    (K-D4 ditegaskan lagi).
 """
 
 from __future__ import annotations
 
-import hashlib
 import html
 import json
 import re
@@ -53,7 +72,17 @@ from typing import Any, Callable, Optional
 # ---------------------------------------------------------------------------
 # Kontrak adapter + RawJob bersama (disatukan koordinator Fase 1):
 # satu definisi di scraper_core/base.py dipakai semua adapter.
-from ..base import JobSourceAdapter, RawJob, user_agent
+# `job_fingerprint` diimpor ulang di sini sebagai re-export supaya kode lama
+# (`from scraper_core.adapters.career_page import job_fingerprint`) tetap
+# jalan; definisi TUNGGAL-nya ada di scraper_core/base.py (K8).
+from ..base import (  # noqa: F401
+    JobSourceAdapter,
+    RawJob,
+    SourceBlockedError,
+    SourceFetchError,
+    job_fingerprint,
+    user_agent,
+)
 from ..parsers import normalize_company
 
 # ---------------------------------------------------------------------------
@@ -263,21 +292,6 @@ def strip_html_to_text(value: Optional[str]) -> str:
     return text.strip()
 
 
-def job_fingerprint(title: str, company: Optional[str], location: Optional[str]) -> str:
-    """Fingerprint dedup lintas sumber: hash(judul+perusahaan+lokasi).
-
-    Dipakai normalizer untuk mendeteksi REPOST: lowongan sama yang muncul
-    lagi dengan id ATS baru / tanggal baru. Fingerprint sama + id berbeda
-    = kemungkinan repost, bukan lowongan baru.
-    """
-    key = "|".join([
-        (title or "").strip().lower(),
-        (company or "").strip().lower(),
-        (location or "").strip().lower(),
-    ])
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]  # sama dgn RawJob.fingerprint
-
-
 def _work_type_from_text(location: Optional[str], workplace: Optional[str]) -> Optional[str]:
     # Medan eksplisit (workplaceType ATS) lebih tepercaya daripada teks
     # lokasi: lokasi "Remote (Indonesia)" pada lowongan Hybrid akan
@@ -318,6 +332,11 @@ def parse_greenhouse_board(payload: dict, slug: str,
     endpoint SATU job (`GET .../jobs/{job_id}`). Jadi `posted_at` dari
     daftar bisa None; `fetch_job()` memanggil endpoint satu job untuk
     mengambil `first_published`. `updated_at` BUKAN tanggal buka.
+    KOREKSI UJI LIVE 15 Nov 2026 (board "discord", 26 lowongan):
+    `first_published` ternyata ADA di daftar untuk 26/26 lowongan
+    (contoh: "2026-11-13T15:33:44-05:00"). Contoh di dokumen resmi
+    tidak lengkap — data live lebih lengkap. Fallback endpoint satu
+    job tetap dipertahankan untuk board yang tidak menyertakannya.
     """
     jobs: list[RawJob] = []
     for item in payload.get("jobs", []) or []:
@@ -401,6 +420,8 @@ def parse_lever_board(payload: Any, slug: str) -> list[RawJob]:
     `createdAt`, tapi respons live memuatnya (epoch milidetik). Kami
     membaca `createdAt` bila ada; bila tidak ada, posted_at = None
     (jangan ditebak). EU board: host api.eu.lever.co.
+    TERKONFIRMASI LIVE 15 Nov 2026 (board "spotify", 87 lowongan):
+    `createdAt` ada di 87/87 (contoh: 1792767640768 -> 2026-10-23).
     """
     jobs: list[RawJob] = []
     items = payload if isinstance(payload, list) else (payload or {}).get("postings", [])
@@ -444,6 +465,10 @@ def parse_ashby_board(payload: dict, slug: str) -> list[RawJob]:
     BERUBAH bila lowongan di-republish. BUKAN tanggal pertama dibuka.
     CekLoker menyimpan `posted_at` = publishedAt + `first_seen_at`
     sendiri, dan menandai repost bila id sama tapi publishedAt meloncat.
+    BUKTI LIVE 15 Nov 2026 (board "ashby", 76 lowongan): lowongan
+    pertama terdaftar punya publishedAt 2024-03-04 — sudah >1,5 tahun
+    tapi masih terdaftar. `publishedAt` lama + masih terdaftar = ciri
+    lowongan evergreen/stale; JANGAN tampilkan sebagai "baru dibuka".
     """
     jobs: list[RawJob] = []
     for item in payload.get("jobs", []) or []:
@@ -496,6 +521,8 @@ def parse_workable_board(payload: dict, slug: str) -> list[RawJob]:
     `apply.workable.com/api/v1/widget/accounts/{slug}`. robots.txt
     apply.workable.com mengizinkan semua (`Disallow:` kosong).
     `published_on` adalah tanggal (YYYY-MM-DD). Tidak ada gaji terstruktur.
+    TERKONFIRMASI LIVE 15 Nov 2026 (board "huggingface", 6 lowongan):
+    `published_on` ada, mis. "2026-05-29".
     """
     jobs: list[RawJob] = []
     for item in payload.get("jobs", []) or []:
@@ -840,15 +867,31 @@ class CareerPageAdapter(JobSourceAdapter):
         masih berisi JobPosting (custom) pada kunjungan ulang.
 
         Dua kunjungan berturut-turut False -> scheduler menandai `closed`
-        (aturan di ARCHITECTURE.md §3)."""
+        (aturan di ARCHITECTURE.md §3). Kegagalan TEKNIS (board tidak
+        bisa dibaca / halaman tidak bisa diparse) BUKAN bukti tutup:
+        di sini dilempar SourceFetchError supaya worker menandai
+        `unknown`, bukan `closed` (amandemen koordinator Fase 1-lanjutan;
+        lihat ADR-0002). Hanya 404 / lowongan benar-benar tidak ada di
+        board yang berarti False."""
         if self.platform == "custom":
             try:
                 self.fetch_job(url)
                 return True
-            except ValueError:
+            except ValueError as exc:
+                msg = str(exc)
+                if "tidak bisa dibaca (404)" in msg:
+                    return False
+                if "tidak bisa dibaca" in msg or "tidak ada JSON-LD" in msg:
+                    raise SourceFetchError(
+                        f"check_active gagal teknis: {exc}"
+                    ) from exc
                 return False
         self._board_cache = None  # paksa baca ulang, jangan pakai cache
         try:
             return url.rstrip("/") in {u.rstrip("/") for u in self.discover()}
-        except (NotImplementedError, ValueError):
-            return False
+        except (SourceFetchError, SourceBlockedError):
+            raise
+        except (NotImplementedError, ValueError) as exc:
+            raise SourceFetchError(
+                f"check_active gagal teknis (board tidak bisa dibaca): {exc}"
+            ) from exc

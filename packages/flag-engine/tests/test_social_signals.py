@@ -16,9 +16,11 @@ from datetime import date
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from social_signals import (
+    Signal,
     aggregate_signals,
     detect_complaints,
     detect_fee_request,
+    normalized_total,
     score_ghost_job,
     score_news_event,
     score_rating,
@@ -381,6 +383,235 @@ class TestAggregate(unittest.TestCase):
         bad = bad.__class__(**{**bad.__dict__, "category": "tak_dikenal"})
         with self.assertRaises(ValueError):
             aggregate_signals([bad])
+
+
+def _sig(category, points, key="buatan", decisive=True):
+    """Signal buatan untuk menguji aritmetika agregasi (bukan dari modul
+    sosial — di produk nyata sinyal transparansi/gaji berasal dari modul
+    lain)."""
+    return Signal(category=category, key=key, value=points, points=points,
+                  evidence_url=URL, evidence_text="", evidence_date=D,
+                  source="glints", confidence="high", decisive=decisive)
+
+
+class TestNormalisasiD7(unittest.TestCase):
+    """D7 (disetujui Giga 15 Nov 2026): total = 100 x perolehan /
+    cap terukur. Lihat ADR-0005 Amandemen D7."""
+
+    def test_nol_kategori_terukur_total_none_bukan_nol(self):
+        # Jangan bagi nol — dan jangan kembalikan 0, karena 0/100 dibaca
+        # sebagai "perusahaan paling buruk", padahal artinya "belum tahu".
+        result = aggregate_signals([])
+        self.assertIsNone(result["total"])
+        self.assertEqual(result["label"], "Belum cukup data")
+        self.assertEqual(result["measured_cap"], 0)
+        self.assertEqual(result["decisive_signals"], 0)
+
+    def test_nol_kategori_terukur_sinyal_konteks_saja(self):
+        # Rating n=2 -> konteks, decisive=False -> kategorinya TIDAK
+        # terukur -> total tetap None.
+        result = aggregate_signals([
+            score_rating(5.0, 2, source="glassdoor", evidence_url=URL, evidence_date=D),
+        ])
+        self.assertIsNone(result["total"])
+        self.assertEqual(result["measured_cap"], 0)
+        self.assertEqual(result["label"], "Belum cukup data")
+
+    def test_satu_kategori_terukur_total_dihitung_tapi_label_belum_cukup(self):
+        # Hanya reputasi: 15/25 -> total 60. Angka dihitung (untuk
+        # debug), tapi label menolak memberi penilaian dari 1 kategori.
+        result = aggregate_signals([
+            score_rating(4.4, 155, source="glassdoor", evidence_url=URL, evidence_date=D),
+        ])
+        self.assertEqual(result["total"], 60)
+        self.assertEqual(result["measured_cap"], 25)
+        self.assertEqual(result["label"], "Belum cukup data")
+
+    def test_semua_kategori_terukur(self):
+        signals = [
+            score_rating(4.4, 155, source="glassdoor", evidence_url=URL, evidence_date=D),
+            score_recommend_rate(97, 155, source="glassdoor", evidence_url=URL, evidence_date=D),
+            score_news_event("ekspansi", n_outlets=2, within_months=2,
+                             evidence_url=URL, evidence_date=D),
+            _sig("transparansi", 25, key="salary_transparency"),
+            _sig("gaji_benefit", 15, key="salary_vs_umr"),
+            _sig("praktik_rekrutmen", 15, key="respon_cepat"),
+        ]
+        result = aggregate_signals(signals)
+        # (15+5+5+25+15+15) / 100 -> 80
+        self.assertEqual(result["measured_cap"], 100)
+        self.assertEqual(result["total"], 80)
+        self.assertEqual(result["label"], "Green")
+        self.assertEqual(result["decisive_categories"],
+                         ["gaji_benefit", "praktik_rekrutmen", "reputasi",
+                          "stabilitas", "transparansi"])
+
+    def test_poin_negatif_menarik_total_ke_nol(self):
+        # Reputasi dijepit di -25 (rating -10 + keluhan -15); perolehan
+        # -50 dari cap 60 -> -83 -> dijepit 0; label Red (5 penentu,
+        # 3 kategori). Total 0 di sini BENAR-BENAR 0 (data terukur dan
+        # buruk), beda dengan None saat 0 kategori terukur.
+        signals = [
+            score_rating(1.5, 100, source="glassdoor", evidence_url=URL, evidence_date=D),
+            detect_complaints(
+                reviews(*(["gaji telat"] * 10 + ["oke"] * 20)),
+                source="glassdoor", evidence_url=URL, evidence_date=D),
+            score_news_event("tutup", n_outlets=2, within_months=1,
+                             evidence_url=URL, evidence_date=D),
+            score_ghost_job(120, 4, job_title="Backend Engineer",
+                            source="glints", evidence_url=URL, evidence_date=D),
+        ]
+        result = aggregate_signals(signals)
+        self.assertEqual(result["per_category"]["reputasi"], -25)
+        self.assertEqual(result["measured_cap"], 60)
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["label"], "Red")
+
+    def test_cap_terukur_hanya_dari_kategori_penentu(self):
+        # Transparansi punya sinyal konteks (decisive=False) -> tidak
+        # masuk penyebut. Cap terukur = reputasi 25 saja.
+        signals = [
+            score_rating(4.4, 155, source="glassdoor", evidence_url=URL, evidence_date=D),
+            score_recommend_rate(97, 155, source="glassdoor", evidence_url=URL, evidence_date=D),
+            _sig("transparansi", 0, key="fee_request", decisive=False),
+        ]
+        result = aggregate_signals(signals)
+        self.assertEqual(result["measured_cap"], 25)
+        self.assertEqual(result["total"], 80)  # 20/25
+        self.assertEqual(result["label"], "Belum cukup data")  # 1 kategori
+
+    def test_normalized_total_helper(self):
+        self.assertEqual(normalized_total(65, 85), 76)
+        self.assertEqual(normalized_total(0, 25), 0)
+        self.assertEqual(normalized_total(-50, 60), 0)  # dijepit bawah
+        self.assertEqual(normalized_total(100, 100), 100)
+        self.assertIsNone(normalized_total(0, 0))
+        self.assertIsNone(normalized_total(10, 0))
+
+
+class TestLabelD7(unittest.TestCase):
+    """Batas label D7: Green >= 70, Mixed >= 40, Red < 40 — dan label
+    hanya diberikan bila >= 3 sinyal penentu dari >= 2 kategori."""
+
+    def test_batas_green_tepat_70(self):
+        signals = [
+            score_rating(4.4, 155, source="glassdoor", evidence_url=URL, evidence_date=D),
+            score_recommend_rate(97, 155, source="glassdoor", evidence_url=URL, evidence_date=D),
+            _sig("transparansi", 15, key="salary_transparency"),
+        ]
+        result = aggregate_signals(signals)
+        self.assertEqual(result["total"], 70)  # 35/50
+        self.assertEqual(result["label"], "Green")
+
+    def test_total_69_masih_mixed(self):
+        signals = [
+            score_rating(4.4, 155, source="glassdoor", evidence_url=URL, evidence_date=D),
+            score_recommend_rate(97, 155, source="glassdoor", evidence_url=URL, evidence_date=D),
+            score_news_event("ekspansi", n_outlets=2, within_months=2,
+                             evidence_url=URL, evidence_date=D),
+            _sig("transparansi", 25, key="salary_transparency"),
+            _sig("gaji_benefit", 15, key="salary_vs_umr"),
+            _sig("praktik_rekrutmen", 4, key="respon_cepat"),
+        ]
+        result = aggregate_signals(signals)
+        self.assertEqual(result["total"], 69)  # 69/100
+        self.assertEqual(result["label"], "Mixed")
+
+    def test_batas_mixed_tepat_40(self):
+        signals = [
+            score_rating(4.4, 155, source="glassdoor", evidence_url=URL, evidence_date=D),
+            score_recommend_rate(97, 155, source="glassdoor", evidence_url=URL, evidence_date=D),
+            _sig("transparansi", 0, key="salary_transparency"),
+        ]
+        result = aggregate_signals(signals)
+        self.assertEqual(result["total"], 40)  # 20/50
+        self.assertEqual(result["label"], "Mixed")
+
+    def test_total_39_jadi_red(self):
+        signals = [
+            score_rating(4.4, 155, source="glassdoor", evidence_url=URL, evidence_date=D),
+            score_recommend_rate(97, 155, source="glassdoor", evidence_url=URL, evidence_date=D),
+            score_news_event("ekspansi", n_outlets=2, within_months=2,
+                             evidence_url=URL, evidence_date=D),
+            _sig("transparansi", 14, key="salary_transparency"),
+            _sig("gaji_benefit", 0, key="salary_vs_umr"),
+            _sig("praktik_rekrutmen", 0, key="respon_cepat"),
+        ]
+        result = aggregate_signals(signals)
+        self.assertEqual(result["total"], 39)  # 39/100
+        self.assertEqual(result["label"], "Red")
+
+    def test_total_tinggi_tetap_belum_cukup_data_bila_satu_kategori(self):
+        # Reputasi sempurna 25/25 -> total 100, tapi 1 kategori saja.
+        result = aggregate_signals([
+            score_rating(4.4, 155, source="glassdoor", evidence_url=URL, evidence_date=D),
+            score_recommend_rate(97, 155, source="glassdoor", evidence_url=URL, evidence_date=D),
+            score_recommend_rate(80, 100, source="glassdoor", evidence_url=URL, evidence_date=D),
+        ])
+        self.assertEqual(result["total"], 100)
+        self.assertEqual(result["label"], "Belum cukup data")
+
+
+class TestK4GooglePlaces(unittest.TestCase):
+    """K4 (ADR-0006): evidence_text boleh null; untuk google_places
+    WAJIB kosong — ditolak keras bila terisi, bukan diam-diam disimpan."""
+
+    def test_google_places_dengan_evidence_text_ditolak(self):
+        with self.assertRaises(ValueError):
+            score_rating(4.4, 155, source="google_places", evidence_url=URL,
+                         evidence_date=D, evidence_text="Pelayanan bagus banget")
+
+    def test_google_places_dengan_evidence_text_di_fungsi_lain_ditolak(self):
+        with self.assertRaises(ValueError):
+            score_recommend_rate(90, 100, source="google_places", evidence_url=URL,
+                                 evidence_date=D, evidence_text="kutipan ulasan")
+        with self.assertRaises(ValueError):
+            score_news_event("ekspansi", n_outlets=2, within_months=2,
+                             source="google_places", evidence_url=URL,
+                             evidence_date=D, evidence_text="judul berita")
+
+    def test_google_places_tanpa_evidence_text_boleh(self):
+        s = score_rating(4.4, 155, source="google_places", evidence_url=URL, evidence_date=D)
+        self.assertEqual(s.points, 15)
+        self.assertEqual(s.evidence_text, "")
+
+    def test_google_places_evidence_text_none_boleh(self):
+        s = score_rating(4.4, 155, source="google_places", evidence_url=URL,
+                         evidence_date=D, evidence_text=None)
+        self.assertIsNone(s.evidence_text)
+        self.assertEqual(s.points, 15)
+
+    def test_google_places_evidence_text_spasi_saja_boleh(self):
+        # Hanya spasi -> setelah dirapikan jadi "" -> dianggap kosong.
+        s = score_rating(4.4, 155, source="google_places", evidence_url=URL,
+                         evidence_date=D, evidence_text="   ")
+        self.assertEqual(s.evidence_text, "")
+
+    def test_signal_langsung_google_places_ditolak(self):
+        with self.assertRaises(ValueError):
+            Signal(category="reputasi", key="rating_overall", value=4.4, points=15,
+                   evidence_url=URL, evidence_text="kutipan", evidence_date=D,
+                   source="google_places", confidence="high")
+
+    def test_evidence_text_none_dipertahankan_untuk_sumber_lain(self):
+        # Boleh null: None bukan diubah diam-diam jadi "".
+        s = score_rating(4.4, 155, source="glassdoor", evidence_url=URL,
+                         evidence_date=D, evidence_text=None)
+        self.assertIsNone(s.evidence_text)
+        self.assertEqual(s.points, 15)
+
+    def test_sumber_lain_dengan_evidence_text_tetap_boleh(self):
+        s = score_rating(4.4, 155, source="glassdoor", evidence_url=URL,
+                         evidence_date=D, evidence_text="Ulasan positif soal gaji.")
+        self.assertEqual(s.evidence_text, "Ulasan positif soal gaji.")
+
+    def test_keluhan_dari_google_places_ditolak(self):
+        # detect_complaints membangun kutipan dari teks ulasan — bila
+        # sumbernya google_places, kutipan itu tidak boleh disimpan.
+        with self.assertRaises(ValueError):
+            detect_complaints(
+                reviews(*(["gaji telat"] * 3 + ["oke"] * 20)),
+                source="google_places", evidence_url=URL, evidence_date=D)
 
 
 if __name__ == "__main__":

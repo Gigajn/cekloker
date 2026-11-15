@@ -1,4 +1,4 @@
-# Skeleton Fase 0 — service diisi penuh di Fase 1
+# CekLoker — service diisi penuh di Fase 1-lanjutan (ADR-0009/0010).
 services:
   postgres:
     image: postgres:16
@@ -27,13 +27,46 @@ services:
     volumes:
       - miniodata:/data
 
-  # api: (Fase 1)
-  #   build: ../apps/api
-  #   env_file: ../.env
-  #   depends_on: [postgres, redis]
-  # worker: (Fase 1) scraper worker, sama image dengan api
-  # web: (Fase 1)
-  #   build: ../apps/web
+  # api: FastAPI (Fase 1-lanjutan, ADR-0009)
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    env_file: ../.env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/loker_greenflag
+      REDIS_URL: redis://redis:6379/0
+    depends_on: [postgres, redis]
+    ports:
+      - "8000:8000"
+
+  # worker: scraper worker recheck, image sama dengan api (ADR-0009).
+  # JANGAN jalan otomatis massal saat dev — jalankan manual:
+  #   docker compose run --rm worker python -m app.worker --once --limit 20
+  worker:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    env_file: ../.env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/loker_greenflag
+      REDIS_URL: redis://redis:6379/0
+    depends_on: [postgres, redis]
+    command: ["python", "-m", "app.worker", "--interval", "3600", "--limit", "50"]
+    profiles: ["worker"]
+
+  # web: Next.js (Fase 1-lanjutan, ADR-0010). Browser pengguna
+  # mengakses API langsung di http://localhost:8000, jadi
+  # NEXT_PUBLIC_API_URL menunjuk localhost, bukan nama service.
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    depends_on: [api]
+    ports:
+      - "3000:3000"
 
 volumes:
   pgdata:

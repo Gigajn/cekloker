@@ -31,6 +31,28 @@ Keterbatasan yang SUDAH diketahui (dari skill yang sama):
   parser di sini defensif (mencari kunci `job`/`jobs` di mana saja
   dalam JSON) dan field yang tak ditemukan = None, bukan tebakan.
 
+HASIL UJI LIVE 15 Nov 2026 (lihat docs/fase1-lanjutan-uji-live.md)
+— ASUMSI `__NEXT_DATA__` GAGAL dari VM ini:
+- `GET www.kalibrr.id/jobs?query=software+engineer` -> HTTP 200
+  TAPI isinya hanya shell SPA ~2,3 KB (tanpa `__NEXT_DATA__`, tanpa
+  URL lowongan, query tidak ter-echo). Data lowongan baru muncul
+  setelah JS jalan — jadi adapter stdlib ini TIDAK BISA menemukan
+  lowongan apa pun dari halaman itu.
+- `robots.txt` (kalibrr.id MAUPUN kalibrr.com) juga mengembalikan
+  shell SPA yang sama — bukan robots.txt sungguhan. Klaim Fase 1
+  ("robots hanya melarang /root dan /candidate/profile") TIDAK
+  TERVERIFIKASI live; `robots_disallows` di bawah dipertahankan
+  sebagai catatan klaim lama, bukan fakta terverifikasi.
+- Respons shell .com memuat penanda `<meta kb="__KB_THIS_IS_A_503__"/>`
+  — kemungkinan Kalibrr menyajikan halaman error ke egress ini.
+  BELUM BISA disimpulkan Kalibrr mati permanen: perlu uji ulang dari
+  jaringan Indonesia (Fedora Giga) sebelum diputuskan (lihat D13).
+- Perilaku adapter sejak perbaikan ini: bila halaman yang diterima
+  TIDAK memuat `__NEXT_DATA__` sama sekali, parser melempar
+  `SourceFetchError` (gagal teknis -> worker menandai `unknown`),
+  BUKAN mengembalikan [] seolah "0 lowongan". Diam-diam kosong
+  adalah data yang salah; gagal jujur adalah data yang benar.
+
 ToS Kalibrr: teks ToS (kalibrr.id/terms) dibaca cuplikannya 15 Nov
 2026 — pemakaian "for professional and legitimate purposes",
 melarang aktivitas ilegal; **tidak ditemukan klausul eksplisit
@@ -123,6 +145,15 @@ def parse_kalibrr_job(html: str, url: str,
     teks = parser.text
     teks_rendah = teks.lower()
     is_active = not any(m in teks_rendah for m in CLOSED_MARKERS)
+
+    # Gagal jujur (uji live 15 Nov 2026): tanpa __NEXT_DATA__ halaman
+    # Kalibrr hanyalah shell SPA tanpa data lowongan. Melempar di sini
+    # supaya worker menandai sumber `unknown`, bukan "0 lowongan".
+    if parser.next_data is None:
+        raise SourceFetchError(
+            "Halaman detail Kalibrr tanpa __NEXT_DATA__ "
+            f"(shell SPA, data tidak tersedia tanpa JS): {url}"
+        )
 
     job: dict = {}
     if parser.next_data:
@@ -222,6 +253,12 @@ def parse_kalibrr_search(html: str) -> list[str]:
 
     Mencari pola `/c/<company>/jobs/<id>/<slug>` di `__NEXT_DATA__`
     maupun di HTML mentah. Deduplikasi menjaga urutan.
+
+    Melempar SourceFetchError bila halaman TIDAK memuat `__NEXT_DATA__`
+    sama sekali dan tidak ada URL ditemukan — itu shell SPA tanpa data
+    (uji live 15 Nov 2026), bukan "0 lowongan". Halaman pencarian yang
+    sah tapi memang 0 hasil tetap mengembalikan [] (karena
+    `__NEXT_DATA__`-nya ada, hanya daftarnya kosong).
     """
     parser = _NextDataParser()
     parser.feed(html)
@@ -234,6 +271,11 @@ def parse_kalibrr_search(html: str) -> list[str]:
         for m in pola.finditer(sumber):
             if m.group(0) not in urls:
                 urls.append(m.group(0))
+    if parser.next_data is None and not urls:
+        raise SourceFetchError(
+            "Halaman pencarian Kalibrr tanpa __NEXT_DATA__ (shell SPA, "
+            "data tidak tersedia tanpa JS) — bukan berarti 0 lowongan."
+        )
     return urls
 
 
@@ -255,6 +297,12 @@ class KalibrrAdapter(JobSourceAdapter):
         `max_pages` diabaikan dengan sengaja: pagination Kalibrr
         terbukti tidak jalan (selalu ~15 hasil pertama). Jangan
         memanggil discover berulang dengan harapan halaman berbeda.
+
+        UJI LIVE 15 Nov 2026: dari VM ini pencarian mengembalikan shell
+        SPA tanpa `__NEXT_DATA__` — `?query=` TIDAK TERVERIFIKASI
+        bekerja, dan discover() melempar SourceFetchError pada kondisi
+        itu (lihat parse_kalibrr_search). Perlu uji ulang dari jaringan
+        Indonesia sebelum disimpulkan (D13).
         """
         query = " ".join(p for p in (keywords, location) if p).strip()
         if not query:

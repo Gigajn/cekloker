@@ -24,13 +24,18 @@ from scraper_core.adapters import (
     JobStreetAdapter,
     KalibrrAdapter,
 )
-from scraper_core.adapters.glints import parse_glints_job, parse_sitemap
+from scraper_core.adapters.glints import (
+    parse_glints_job,
+    parse_sitemap,
+    visible_text,
+)
 from scraper_core.adapters.kalibrr import (
     parse_kalibrr_job,
     parse_kalibrr_search,
 )
 from scraper_core.base import (
     RawJob,
+    SourceFetchError,
     SourceNotPermittedError,
     allowed_by_robots,
 )
@@ -182,6 +187,51 @@ def test_glints_parse_job_aktif():
     assert job.is_active is True
 
 
+def test_glints_i18n_bundle_tidak_menandai_tutup():
+    # REGRESI uji live 15 Nov 2026: bundel i18n di <script> memuat pesan
+    # "lowongan ini sudah ditutup" di SEMUA halaman detail. Lowongan
+    # AKTIF (validThrough 2026-12-16 > REF) tidak boleh ditandai tutup.
+    html = _baca("glints_job_i18n_bundle.html")
+    assert "lowongan ini sudah ditutup" in html.lower()  # ada di mentah
+    assert "lowongan ini sudah ditutup" not in visible_text(html).lower()
+    job = parse_glints_job(html, GLINTS_URL, REF)
+    assert job.title == "Corporate Sales Executive"
+    assert job.company_raw == "PT. AME KUNINGAN JAYA"
+    assert job.location == "Jakarta Selatan"
+    assert job.posted_at == date(2026, 8, 27)  # datePosted ISO, pasti
+    assert job.posted_at_certain is True
+    assert job.salary_min == 5_000_000 and job.salary_max == 5_500_000
+    assert job.is_active is True
+
+
+def test_glints_validthrough_lewat_menandai_tutup():
+    # validThrough 2026-11-01 sudah lewat dari REF (2026-11-15) dan
+    # tidak ada penanda tutup di teks tampil: tutup lewat validThrough.
+    job = parse_glints_job(
+        _baca("glints_job_validthrough_lewat.html"), GLINTS_URL, REF)
+    assert job.posted_at == date(2026, 9, 1)
+    assert job.is_active is False
+
+
+def test_glints_sitemap_dedup_varian_locale():
+    # Lowongan yang sama muncul 2x di sitemap (/id/ dan /id/en/, UUID
+    # sama) — discover harus mengembalikan 1 URL (uji live 15 Nov 2026).
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        "<url><loc>https://glints.com/id/opportunities/jobs/staff-programmer/"
+        "ad093d00-3e7d-4f25-a56e-be88fda4632d</loc></url>"
+        "<url><loc>https://glints.com/id/en/opportunities/jobs/staff-programmer/"
+        "ad093d00-3e7d-4f25-a56e-be88fda4632d</loc></url>"
+        "<url><loc>https://glints.com/id/opportunities/jobs/backend-engineer/"
+        "11111111-2222-3333-4444-555555555555</loc></url>"
+        "</urlset>"
+    )
+    urls = parse_sitemap(xml)
+    assert len(urls) == 2
+    assert urls[0].endswith("ad093d00-3e7d-4f25-a56e-be88fda4632d")
+
+
 def test_glints_parse_job_tutup():
     job = parse_glints_job(_baca("glints_job_closed.html"), GLINTS_URL, REF)
     assert job.is_active is False
@@ -280,6 +330,31 @@ def test_kalibrr_search_ambil_url_detail():
         "https://www.kalibrr.id/c/pt-fiktif-teknologi-nusantara/jobs/100001/backend-engineer",
         "https://www.kalibrr.id/c/pt-contoh-maju-bersama/jobs/100002/frontend-engineer",
     ]
+
+
+def test_kalibrr_shell_spa_gagal_jujur_bukan_kosong():
+    # REGRESI uji live 15 Nov 2026: pencarian Kalibrr mengembalikan
+    # HTTP 200 berisi shell SPA tanpa __NEXT_DATA__. Parser HARUS
+    # melempar SourceFetchError (worker -> unknown), BUKAN [] seolah
+    # "0 lowongan".
+    shell = _baca("kalibrr_search_shell.html")
+    assert '<script id="__NEXT_DATA__"' not in shell
+    with pytest.raises(SourceFetchError):
+        parse_kalibrr_search(shell)
+    with pytest.raises(SourceFetchError):
+        parse_kalibrr_job(shell, KALIBRR_URL, REF)
+
+
+def test_kalibrr_search_tanpa_hasil_tapi_ada_next_data_tetap_kosong():
+    # Bedakan dari shell: halaman pencarian SAH yang memang 0 hasil
+    # tetap punya __NEXT_DATA__ (daftar kosong) -> [] adalah jawaban
+    # yang benar, bukan error.
+    html = (
+        '<html><head><script id="__NEXT_DATA__" type="application/json">'
+        '{"props":{"pageProps":{"jobs":[]}}}'
+        "</script></head><body>tidak ada lowongan</body></html>"
+    )
+    assert parse_kalibrr_search(html) == []
 
 
 # ---------------------------------------------------------------------------

@@ -20,6 +20,15 @@ Aturan main (lihat docs/adr/ADR-0005 dan ADR-0006):
     reviewer, email, telepon, atau isi DM/grup tertutup. Kutipan
     (evidence_text) dibatasi <= 280 karakter oleh pemanggil; fungsi
     ``_truncate_quote`` memotong bila lebih.
+6.  ``evidence_text`` boleh None (tidak ada kutipan) — dan untuk sumber
+    ``google_places`` WAJIB kosong (None/""): Places API Policies melarang
+    menyimpan teks ulasan; yang boleh disimpan hanya rating, jumlah,
+    place_id, dan tautan. Pelanggaran DITOLAK keras (``ValueError``),
+    bukan diam-diam dikosongkan (K4, ADR-0006).
+7.  Total skor DINORMALISASI (D7, disetujui Giga 15 Nov 2026 — lihat
+    ADR-0005 Amandemen D7): ``100 × perolehan / cap terukur``. "Cap
+    terukur" = jumlah cap kategori yang punya sinyal penentu. Bila 0
+    kategori terukur, total = None (bukan 0) dan label "Belum cukup data".
 
 Penggunaan:
     from social_signals import score_rating, detect_complaints, ...
@@ -39,6 +48,7 @@ __all__ = [
     "Signal",
     "Confidence",
     "CATEGORY_CAPS",
+    "SOURCE_GOOGLE_PLACES",
     "COMPLAINT_CLUSTERS",
     "FEE_PATTERNS",
     "EVERGREEN_ROLE_KEYWORDS",
@@ -48,6 +58,7 @@ __all__ = [
     "detect_fee_request",
     "score_ghost_job",
     "score_news_event",
+    "normalized_total",
     "aggregate_signals",
 ]
 
@@ -64,6 +75,10 @@ CATEGORY_CAPS: dict[str, int] = {
     "praktik_rekrutmen": 15,
     "gaji_benefit": 15,
 }
+
+#: Sumber ulasan Google (Places API). Satu-satunya sumber yang
+#: evidence_text-nya WAJIB kosong — lihat K4 di Signal.__post_init__.
+SOURCE_GOOGLE_PLACES = "google_places"
 
 #: Label skor. "Belum cukup data" bila sinyal penentu < 3 (ARCHITECTURE §5).
 LABEL_GREEN_MIN = 70
@@ -122,7 +137,10 @@ class Signal:
     value: object  # angka / string / bool — nilai mentah yang diukur
     points: int
     evidence_url: str
-    evidence_text: str  # kutipan singkat (<= 280 karakter); "" untuk Google (lihat ADR-0006)
+    # Kutipan singkat (<= 280 karakter). Boleh None — artinya "tidak ada
+    # kutipan" (mis. sinyal dari angka agregat saja). Untuk sumber
+    # google_places WAJIB kosong (None atau "") — lihat __post_init__ (K4).
+    evidence_text: str | None
     evidence_date: date | str | None
     source: str  # mis. "glassdoor", "jobstreet_review", "google_places", "google_news_rss"
     confidence: str  # "high" | "medium" | "low"
@@ -132,6 +150,24 @@ class Signal:
     #: label "Belum cukup data" (< 3 sinyal penentu). Rating dengan n < 5
     #: atau konteks tanpa poin -> False.
     decisive: bool = False
+
+    def __post_init__(self) -> None:
+        # K4 (ADR-0006 butir A-3): Google Places API Policies melarang
+        # menyimpan teks ulasan — hanya place_id yang dikecualikan dari
+        # larangan pre-fetch/cache/store. Karena itu sinyal dari
+        # google_places yang membawa evidence_text terisi DITOLAK keras
+        # (ValueError), BUKAN diam-diam dikosongkan: pemanggil yang
+        # keliru mengirim teks ulasan harus langsung ketahuan dan
+        # diperbaiki di sumbernya, bukan lolos tanpa jejak. Yang boleh
+        # disimpan dari sumber ini: rating, jumlah ulasan, place_id,
+        # dan tautan (lihat `value`/`evidence_url` — bukan teks).
+        # Kosong yang diterima: None, "", atau hanya spasi.
+        if self.source == SOURCE_GOOGLE_PLACES and (self.evidence_text or "").strip():
+            raise ValueError(
+                "sinyal google_places dilarang membawa evidence_text "
+                "(Places API Policies: teks ulasan tidak boleh disimpan; "
+                "hanya rating, jumlah, place_id, dan tautan yang boleh)"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -232,9 +268,16 @@ EVERGREEN_ROLE_KEYWORDS: tuple[str, ...] = (
 # Utilitas internal
 # ---------------------------------------------------------------------------
 
-def _truncate_quote(text: str) -> str:
-    """Potong kutipan ke MAX_QUOTE_CHARS; tanpa pemotongan tidak tampil."""
-    text = " ".join((text or "").split())
+def _truncate_quote(text: str | None) -> str | None:
+    """Potong kutipan ke MAX_QUOTE_CHARS; tanpa pemotongan tidak tampil.
+
+    None dipertahankan sebagai None (bukan diubah jadi "") — supaya
+    pemanggil yang sengaja tidak memberi kutipan tetap tercatat "tidak
+    ada kutipan" di model/skema, bukan "kutipan kosong". Lihat K4.
+    """
+    if text is None:
+        return None
+    text = " ".join(text.split())
     if len(text) <= MAX_QUOTE_CHARS:
         return text
     return text[: MAX_QUOTE_CHARS - 1].rstrip() + "…"
@@ -275,9 +318,13 @@ def score_rating(
     source: str,
     evidence_url: str,
     evidence_date: date | str | None,
-    evidence_text: str = "",
+    evidence_text: str | None = "",
 ) -> Signal:
     """Skor dari rating agregat + jumlah ulasan.
+
+    ``evidence_text`` boleh None (tidak ada kutipan); untuk sumber
+    ``google_places`` WAJIB kosong — bila terisi, Signal menolak keras
+    (ValueError, lihat K4 di ``Signal.__post_init__``).
 
     Poin penuh HANYA bila n >= 20 (galat baku rata-rata rating dengan
     simpangan baku ~1,0 pada n=20 adalah ~0,22 — cukup untuk membedakan
@@ -349,9 +396,12 @@ def score_recommend_rate(
     source: str,
     evidence_url: str,
     evidence_date: date | str | None,
-    evidence_text: str = "",
+    evidence_text: str | None = "",
 ) -> Signal:
     """Skor dari persentase 'merekomendasikan ke teman'.
+
+    ``evidence_text`` boleh None; untuk ``google_places`` WAJIB kosong
+    (K4 — lihat ``Signal.__post_init__``).
 
     n < 20 -> konteks saja (persentase dari segelintir orang menyesatkan:
     100% dari 4 orang bukan sinyal). Ambang 80% / 50% heuristik Fase 2.
@@ -415,6 +465,11 @@ def detect_complaints(
     >= 3 ulasan berbeda dengan keluhan yang sama -> -5;
     >= 5 ulasan DAN pangsa >= 10% dari sampel -> -15.
     Di bawah itu -> 0 poin, konteks saja (termasuk 1-2 ulasan ekstrem).
+
+    Catatan K4: fungsi ini MEMBANGUN evidence_text dari teks ulasan,
+    jadi JANGAN dipanggil dengan source="google_places" — teks ulasan
+    Google dilarang disimpan (ADR-0006), dan Signal akan menolak keras
+    (ValueError) bila kutipan keluhan berhasil dibentuk dari sumber itu.
 
     Nilai ``value`` adalah dict {cluster: jumlah ulasan} untuk cluster
     yang muncul. ``evidence_text`` berisi contoh kutipan pertama yang
@@ -637,9 +692,12 @@ def score_news_event(
     source: str = "google_news_rss",
     evidence_url: str,
     evidence_date: date | str | None,
-    evidence_text: str = "",
+    evidence_text: str | None = "",
 ) -> Signal:
     """Sinyal dari berita (judul + media, BUKAN isi artikel penuh).
+
+    ``evidence_text`` boleh None; untuk ``google_places`` WAJIB kosong
+    (K4 — lihat ``Signal.__post_init__``).
 
     ``event_type``: "layoff_massal" | "tutup" | "ekspansi" | "pendanaan".
     Poin negatif HANYA bila >= 2 media independen (atau pernyataan resmi)
@@ -697,24 +755,60 @@ def score_news_event(
 # Agregasi
 # ---------------------------------------------------------------------------
 
+def normalized_total(earned: int, measured_cap: int) -> int | None:
+    """Total ternormalisasi D7 (disetujui Giga 15 Nov 2026 — ADR-0005
+    Amandemen D7): ``100 × perolehan / cap terukur``, dijepit 0–100.
+
+    Apa itu "cap terukur"?
+    Jumlah cap kategori yang SUDAH PUNYA sinyal penentu (``decisive=True``)
+    — bukan jumlah cap kelima kategori (100), dan bukan jumlah cap semua
+    kategori yang punya sinyal apa pun. Sinyal konteks (0 poin, tidak
+    penentu — mis. rating dari 2 ulasan) TIDAK membuat kategorinya
+    terukur, karena konteks tidak membuktikan apa-apa tentang perusahaan
+    itu. Kategori yang belum terukur tidak masuk penyebut, supaya
+    "data belum diukur" tidak disamakan dengan "data buruk".
+
+    Bila ``measured_cap`` == 0 (tidak ada satu pun kategori terukur):
+    kembalikan None — JANGAN bagi nol, dan JANGAN kembalikan 0, karena
+    0/100 akan dibaca sebagai "perusahaan paling buruk" padahal artinya
+    "kami belum tahu apa-apa". Pemanggil (API/UI) wajib menampilkan
+    label "Belum cukup data", bukan angka 0.
+
+    Pembulatan memakai ``round()`` Python (half-even, ke genap terdekat);
+    selisih dari nilai eksak maksimal 1 poin. Nilai tepat 39,5 / 69,5
+    (yang akan mengubah label bila dibulatkan) tidak dapat terjadi
+    dengan cap kategori 15/20/25 — jadi pembulatan tidak pernah mengubah
+    label Green/Mixed/Red.
+    """
+    if measured_cap <= 0:
+        return None
+    return max(0, min(100, int(round(100 * earned / measured_cap))))
+
+
 def aggregate_signals(signals: Sequence[Signal]) -> dict:
     """Gabungkan sinyal menjadi skor total + label.
 
-    PERUBAHAN HASIL GRILL (G-2, lihat ADR-0005): total BUKAN penjumlahan
-    mentah seperti draf ARCHITECTURE.md §5. Penjumlahan mentah menghukum
-    data yang BELUM diukur seolah-olah itu data BURUK — perusahaan bagus
-    yang baru terukur reputasinya (maks. 25 poin) akan langsung berlabel
-    Red (25/100). Karena itu total di sini DINORMALISASI terhadap
-    kategori yang sudah terukur:
+    Rumus D7 (ADR-0005 Amandemen D7, disetujui Giga 15 Nov 2026) —
+    total BUKAN penjumlahan mentah seperti draf ARCHITECTURE.md §5.
+    Penjumlahan mentah menghukum data yang BELUM diukur seolah-olah itu
+    data BURUK — perusahaan bagus yang baru terukur reputasinya (maks.
+    25 poin) akan langsung berlabel Red (25/100). Karena itu total di
+    sini DINORMALISASI terhadap kategori yang sudah terukur:
 
         total = 100 * (poin kategori) / (cap kategori yang terukur)
 
-    Kategori tanpa sinyal penentu tidak masuk penyebut. Label baru
-    diberikan bila ada >= 3 sinyal penentu dari >= 2 kategori berbeda;
-    di bawah itu labelnya "Belum cukup data" (bukan Mixed/Red).
-    Fee (red_override) -> label "Red" + peringatan, apa pun totalnya.
+    "Cap terukur" (``measured_cap``) = jumlah cap kategori yang punya
+    >= 1 sinyal penentu — lihat ``normalized_total`` untuk definisi
+    lengkapnya. Bila 0 kategori terukur, total = None (bukan 0).
 
-    Kembalian: dict dengan kunci total, label, per_category,
+    Label diberikan bila ada >= 3 sinyal penentu dari >= 2 kategori
+    berbeda; di bawah itu labelnya "Belum cukup data" (bukan Mixed/Red).
+    Perhatian: total tetap dihitung (angka) walau labelnya "Belum cukup
+    data" — angka itu hanya untuk debug/internal; UI wajib menampilkan
+    labelnya, bukan angkanya. Fee (red_override) -> label "Red" +
+    peringatan, apa pun totalnya.
+
+    Kembalian: dict dengan kunci total (int | None), label, per_category,
     measured_cap, decisive_signals, decisive_categories, red_override,
     warnings, signals.
     """
@@ -743,19 +837,15 @@ def aggregate_signals(signals: Sequence[Signal]) -> dict:
     }
     measured_cap = sum(CATEGORY_CAPS[c] for c in decisive_categories)
     earned = sum(per_category[c] for c in decisive_categories)
-    if measured_cap > 0:
-        total = int(round(100 * earned / measured_cap))
-    else:
-        total = 0
-    total = max(0, min(100, total))
+    total = normalized_total(earned, measured_cap)
 
     if red_override:
         label = "Red"
     elif decisive < 3 or len(decisive_categories) < 2:
         label = "Belum cukup data"
-    elif total >= LABEL_GREEN_MIN:
+    elif total is not None and total >= LABEL_GREEN_MIN:
         label = "Green"
-    elif total >= LABEL_MIXED_MIN:
+    elif total is not None and total >= LABEL_MIXED_MIN:
         label = "Mixed"
     else:
         label = "Red"

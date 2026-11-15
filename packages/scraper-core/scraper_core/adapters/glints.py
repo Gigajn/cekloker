@@ -31,6 +31,18 @@ dipatuhi). Giga perlu membaca ToS Glints sebelum rilis publik.
 
 Penanda tutup (terverifikasi dari halaman contoh 15 Nov 2026):
 halaman lowongan yang tutup menampilkan teks "This job was closed".
+
+PERBAIKAN UJI LIVE 15 Nov 2026 (lihat docs/fase1-lanjutan-uji-live.md):
+teks penanda tutup JUGA ada di bundel terjemahan i18n di dalam
+<script> ("job.card.job.closed.message":"lowongan ini sudah
+ditutup") — jadi ada di SEMUA halaman detail, aktif maupun tutup.
+Versi lama adapter mencari penanda di SELURUH HTML mentah sehingga
+lowongan AKTIF pun ditandai tutup (false positive; terbukti pada
+lowongan Corporate Sales Executive, validThrough 2026-12-16, yang
+ditandai is_active=False). Sejak perbaikan ini penanda tutup HANYA
+dicari di TEKS TAMPIL (di luar <script>/<style>), dan `validThrough`
+dari JSON-LD dipakai sebagai sinyal kedua: bila sudah lewat,
+lowongan dianggap tutup.
 """
 
 from __future__ import annotations
@@ -49,11 +61,27 @@ JOB_URL_RE = re.compile(
     r"https://glints\.com/(?:id/)?(?:en/)?opportunities/jobs/"
     r"[a-z0-9-]+/[0-9a-f-]{36}", re.IGNORECASE
 )
+_JOB_UUID_RE = re.compile(r"([0-9a-f-]{36})$", re.IGNORECASE)
 CLOSED_MARKERS = (
     "this job was closed",
     "lowongan ini sudah ditutup",
     "pekerjaan ini sudah ditutup",
 )
+_SCRIPT_STYLE_RE = re.compile(
+    r"<(?:script|style)\b[^>]*>.*?</(?:script|style)\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def visible_text(html: str) -> str:
+    """Teks tampil halaman: buang isi <script>/<style> dulu.
+
+    Alasan: bundel i18n/JS Glints memuat SEMUA pesan UI (termasuk
+    pesan "lowongan ini sudah ditutup") di setiap halaman — mencari
+    penanda tutup di HTML mentah memberi false positive (uji live
+    15 Nov 2026). Fungsi ini dipakai penanda tutup + fallback teks.
+    """
+    return _SCRIPT_STYLE_RE.sub(" ", html)
 
 
 # ---------------------------------------------------------------------------
@@ -62,13 +90,20 @@ CLOSED_MARKERS = (
 
 
 class _GlintsPageParser(HTMLParser):
-    """Kumpulkan: blok JSON-LD, <title>, <h1>, dan seluruh teks halaman
-    (untuk penanda tutup + fallback "Posted X ago" / gaji)."""
+    """Kumpulkan: blok JSON-LD, <title>, <h1>, dan TEKS TAMPIL halaman
+    (untuk penanda tutup + fallback "Posted X ago" / gaji).
+
+    Isi <script> (kecuali ld+json) dan <style> TIDAK masuk teks tampil:
+    bundel i18n Glints memuat pesan "lowongan ini sudah ditutup" di
+    setiap halaman (uji live 15 Nov 2026) — kalau ikut dihitung,
+    semua lowongan jadi "tutup"."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.json_ld: list[dict] = []
         self._in_ld_json = False
+        self._in_script = False
+        self._in_style = False
         self._ld_buf: list[str] = []
         self._in_title = False
         self._in_h1 = False
@@ -81,6 +116,10 @@ class _GlintsPageParser(HTMLParser):
         if tag == "script" and attrs.get("type") == "application/ld+json":
             self._in_ld_json = True
             self._ld_buf = []
+        elif tag == "script":
+            self._in_script = True
+        elif tag == "style":
+            self._in_style = True
         elif tag == "title":
             self._in_title = True
         elif tag == "h1":
@@ -97,6 +136,10 @@ class _GlintsPageParser(HTMLParser):
             for item in items:
                 if isinstance(item, dict):
                     self.json_ld.append(item)
+        elif tag == "script":
+            self._in_script = False
+        elif tag == "style":
+            self._in_style = False
         elif tag == "title":
             self._in_title = False
         elif tag == "h1":
@@ -109,7 +152,10 @@ class _GlintsPageParser(HTMLParser):
             self.title += data
         elif self._in_h1:
             self.h1 += data
-        self.text_parts.append(data)
+        # Teks tampil saja: bukan isi script/style/ld+json.
+        if not self._in_script and not self._in_style \
+                and not self._in_ld_json:
+            self.text_parts.append(data)
 
     @property
     def text(self) -> str:
@@ -120,10 +166,25 @@ def parse_sitemap(xml_text: str) -> list[str]:
     """Ambil URL lowongan dari sitemap (index maupun sitemap biasa).
 
     Hanya URL yang cocok pola `/opportunities/jobs/<slug>/<uuid>` yang
-    dikembalikan — URL perusahaan/blog disaring keluar.
+    dikembalikan — URL perusahaan/blog disaring keluar. Lowongan yang
+    sama muncul 2x di sitemap (varian `/id/` dan `/id/en/`, UUID sama)
+    — didedup berdasarkan UUID, varian pertama dipertahankan.
+    Uji live 15 Nov 2026: sitemap_index.xml berisi 4.898 child sitemap;
+    `sitemap_job_id_1.xml` berisi 200 URL, 200/200 cocok pola lowongan.
     """
     urls = re.findall(r"<loc>\s*(https?://[^<\s]+)\s*</loc>", xml_text)
-    return [u for u in urls if JOB_URL_RE.match(u)]
+    hasil: list[str] = []
+    lihat_uuid: set[str] = set()
+    for u in urls:
+        if not JOB_URL_RE.match(u):
+            continue
+        m = _JOB_UUID_RE.search(u)
+        uuid = m.group(1).lower() if m else u
+        if uuid in lihat_uuid:
+            continue
+        lihat_uuid.add(uuid)
+        hasil.append(u)
+    return hasil
 
 
 def _jobposting_from_ld_json(blocks: list[dict]) -> Optional[dict]:
@@ -149,6 +210,8 @@ def parse_glints_job(html: str, url: str, ref: Optional[date] = None) -> RawJob:
     teks = parser.text
     teks_rendah = teks.lower()
 
+    # Penanda tutup HANYA dari teks tampil (di luar script/style) —
+    # bundel i18n di <script> memuat pesan tutup di semua halaman.
     is_active = not any(m in teks_rendah for m in CLOSED_MARKERS)
 
     job = _jobposting_from_ld_json(parser.json_ld)
@@ -160,6 +223,7 @@ def parse_glints_job(html: str, url: str, ref: Optional[date] = None) -> RawJob:
     posted_at = None
     posted_certain = True
     posted_raw = ""
+    valid_through = None
     description = ""
 
     if job:
@@ -189,7 +253,18 @@ def parse_glints_job(html: str, url: str, ref: Optional[date] = None) -> RawJob:
         if date_posted:
             posted_raw = date_posted
             posted_at, posted_certain = parse_posted_at(date_posted, ref)
+        # Sinyal kedua status aktif (schema.org): lowongan tidak valid
+        # lagi setelah validThrough. Dipakai bila penanda tutup teks
+        # tidak ada — mis. lowongan kedaluwarsa diam-diam.
+        valid_raw = str(job.get("validThrough") or "")
+        if valid_raw:
+            valid_through, _ = parse_posted_at(valid_raw, ref)
         description = str(job.get("description") or "")
+
+    if valid_through is not None:
+        hari_ini = ref or date.today()
+        if valid_through < hari_ini:
+            is_active = False
 
     if not title:
         # Fallback: <h1>, lalu <title> ("Judul Jobs at Perusahaan | Glints")
@@ -267,13 +342,13 @@ class GlintsAdapter(JobSourceAdapter):
                  max_pages: int = 1) -> list[str]:
         """Daftar URL lowongan via sitemap index.
 
-        Keterbatasan jujur (ASUMSI, perlu uji live): isi
-        `sitemap_index.xml` belum diverifikasi berisi sitemap lowongan
-        (robots.txt hanya mendeklarasikan keberadaannya). `keywords` /
-        `location` di v1 HANYA dipakai untuk menyaring hasil sitemap
-        berdasarkan slug URL — bukan query ke server. Kalau sitemap
-        ternyata tidak memuat lowongan, discover harus diganti ke
-        halaman list publik (bukan explore ber-query).
+        TERVERIFIKASI LIVE 15 Nov 2026: `sitemap_index.xml` berisi 4.898
+        child sitemap; sitemap lowongan (`sitemap_job_id_*.xml`) berisi
+        200 URL dan semuanya cocok pola lowongan. `keywords` / `location`
+        di v1 HANYA dipakai untuk menyaring hasil sitemap berdasarkan
+        slug URL — bukan query ke server. Kalau sitemap ternyata tidak
+        memuat lowongan, discover harus diganti ke halaman list publik
+        (bukan explore ber-query).
         """
         status, xml = self._get(SITEMAP_INDEX)
         if status != 200:
@@ -293,6 +368,14 @@ class GlintsAdapter(JobSourceAdapter):
         return parse_glints_job(html, url)
 
     def check_active(self, url: str) -> bool:
+        """Masih buka? Satu sumber kebenaran: parse_glints_job.
+
+        Alasan: penanda tutup + validThrough hanya benar bila dihitung
+        dari teks tampil + JSON-LD yang sama seperti fetch_job (uji
+        live 15 Nov 2026: cek penanda di HTML mentah memberi false
+        positive karena bundel i18n). 404 -> False; gagal teknis ->
+        SourceFetchError (status lama dipertahankan, unknown).
+        """
         status, html = self._get(url)
         if status == 404:
             return False
@@ -301,5 +384,4 @@ class GlintsAdapter(JobSourceAdapter):
                 f"check_active Glints gagal teknis (HTTP {status}): {url} "
                 "— status lama dipertahankan (unknown), bukan closed."
             )
-        return "this job was closed" not in html.lower() \
-            and "lowongan ini sudah ditutup" not in html.lower()
+        return parse_glints_job(html, url).is_active

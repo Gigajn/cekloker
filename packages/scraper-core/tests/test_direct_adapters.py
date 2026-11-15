@@ -143,6 +143,63 @@ def test_job_fingerprint_same_for_repost():
         job_fingerprint("Frontend Engineer", "Contoh Corp", "Jakarta")
 
 
+def test_job_fingerprint_sama_dengan_rawjob_fingerprint():
+    # K8 (Fase 1-lanjutan): SATU definisi — job_fingerprint() di base.py
+    # dipakai RawJob.fingerprint() dan semua adapter. Dulu ada dua
+    # definisi (nama mentah vs company_norm); kini disamakan ke
+    # company_norm, 32 karakter hex, tanpa URL.
+    job = RawJob(
+        source_id="greenhouse",
+        source_url="https://boards.greenhouse.io/contohcorp/jobs/101",
+        title="Backend Engineer",
+        company_raw="PT Contoh Corp",
+        company_norm="Contoh Corp",
+        location="Jakarta",
+    )
+    assert len(job.fingerprint()) == 32
+    assert job.fingerprint() == job_fingerprint("Backend Engineer", "Contoh Corp", "Jakarta")
+    assert job.fingerprint() == job_fingerprint("Backend Engineer", "PT Contoh Corp", "Jakarta")
+
+
+def test_job_fingerprint_imbuhan_badan_hukum_diabaikan():
+    # "PT X", "X Tbk", "x" = perusahaan yang sama -> fingerprint sama.
+    # Inilah alasan K8 memilih company_norm, bukan nama mentah.
+    assert job_fingerprint("Backend Engineer", "PT Contoh Corp", "Jakarta") == \
+        job_fingerprint("Backend Engineer", "Contoh Corp Tbk", "Jakarta") == \
+        job_fingerprint("Backend Engineer", "contoh corp", "Jakarta") == \
+        job_fingerprint("Backend Engineer", "CV Contoh Corp", "Jakarta")
+
+
+def test_job_fingerprint_repost_beda_url_beda_sumber_sama():
+    # Repost: judul + perusahaan sama, URL + sumber beda -> fingerprint
+    # SAMA, karena URL sengaja tidak masuk fingerprint. Kalau URL ikut
+    # dihitung, repost tidak akan pernah terdeteksi.
+    a = RawJob(
+        source_id="glints",
+        source_url="https://glints.com/id/opportunities/jobs/aaa-111",
+        title="Backend Engineer",
+        company_raw="Contoh Corp",
+        company_norm="Contoh Corp",
+        location="Jakarta",
+    )
+    b = RawJob(
+        source_id="kalibrr",
+        source_url="https://www.kalibrr.com/c/contoh-corp/jobs/999",
+        title="Backend Engineer",
+        company_raw="PT Contoh Corp Tbk",
+        company_norm="Contoh Corp",
+        location="Jakarta",
+    )
+    assert a.fingerprint() == b.fingerprint()
+
+
+def test_job_fingerprint_lokasi_beda_tetap_beda():
+    # Lokasi MASUK fingerprint: lowongan yang sama judulnya di kota
+    # berbeda (kantor cabang) bukan lowongan yang sama.
+    assert job_fingerprint("Backend Engineer", "Contoh Corp", "Jakarta") != \
+        job_fingerprint("Backend Engineer", "Contoh Corp", "Bandung")
+
+
 # ---------------------------------------------------------------------------
 # Parser board ATS
 # ---------------------------------------------------------------------------
@@ -236,6 +293,73 @@ def test_parse_board_dispatch_and_unknown():
         parse_board("workday", {}, "contohcorp")
     with pytest.raises(ValueError):
         parse_board("tidak-ada", {}, "contohcorp")
+
+
+# ---------------------------------------------------------------------------
+# Parser board ATS — fixture LIVE 15 Nov 2026 (disederhanakan dari respons
+# nyata; hanya field yang dipakai parser + 1 lowongan fiktif kedua).
+# ---------------------------------------------------------------------------
+
+
+def test_parse_greenhouse_board_live_first_published_di_list():
+    # K-D1 TERJAWAB SEBAGIAN: dokumen resmi tidak menjamin first_published
+    # di list, tapi data live board "discord" (26 lowongan) memuatnya
+    # untuk 26/26. Fallback endpoint satu job tetap ada bila tidak ada.
+    jobs = parse_greenhouse_board(
+        load_fixture("greenhouse_board_live.json"), "discord")
+    assert len(jobs) == 2
+    first = jobs[0]
+    assert first.title == "Account Executive, Mobile Gaming"
+    assert first.location == "San Francisco Bay Area"
+    assert first.posted_at == date(2026, 11, 13)  # first_published ISO
+    assert first.job_key == "greenhouse:discord:8927168002"
+    assert first.source_url == (
+        "https://job-boards.greenhouse.io/discord/jobs/8927168002")
+    assert jobs[1].posted_at == date(2026, 11, 10)
+
+
+def test_parse_lever_board_live_createdAt_ada():
+    # K-D2 TERJAWAB: createdAt (epoch ms) ADA di respons live board
+    # "spotify" untuk 87/87 lowongan, meski tidak ada di tabel README.
+    jobs = parse_lever_board(load_fixture("lever_board_live.json"), "spotify")
+    assert len(jobs) == 2
+    first = jobs[0]
+    assert first.title == "Account Executive - Commercial, Spotify Technology"
+    assert first.location == "New York, NY"
+    assert first.posted_at == date(2026, 10, 23)  # createdAt 1792767640768
+    assert first.job_key == (
+        "lever:spotify:2a55d6c9-c564-443a-be3e-a3851db5a93b")
+    assert jobs[1].salary_min == 600_000
+    assert jobs[1].work_type == "hybrid"
+
+
+def test_parse_ashby_board_live_publishedAt_lama():
+    # K-D3 TERKONFIRMASI: publishedAt = TERAKHIR dipublikasikan.
+    # Lowongan pertama board "ashby" punya publishedAt 2024-03-04
+    # (>1,5 tahun lalu) tapi masih terdaftar — evergreen/stale, bukan
+    # "baru dibuka". posted_at disimpan apa adanya; first_seen_at +
+    # deteksi repost yang membedakan.
+    jobs = parse_ashby_board(load_fixture("ashby_board_live.json"), "ashby")
+    assert len(jobs) == 2
+    first = jobs[0]
+    assert first.title == "Engineering Manager - EU"
+    assert first.posted_at == date(2024, 3, 4)
+    assert first.location == "Remote - European Union, Spain, Italy"
+    assert jobs[1].posted_at == date(2026, 11, 12)
+
+
+def test_parse_workable_board_live_published_on():
+    # Board "huggingface" (6 lowongan): published_on tanggal saja.
+    jobs = parse_workable_board(
+        load_fixture("workable_board_live.json"), "huggingface")
+    assert len(jobs) == 2
+    first = jobs[0]
+    assert first.title == "Open-Source Machine Learning Engineer - EMEA Remote"
+    assert first.company_raw == "Hugging Face"
+    assert first.posted_at == date(2026, 5, 29)  # published_on YYYY-MM-DD
+    assert first.platform_job_id == "81B46579FE"
+    assert first.location == "Paris, Île-de-France, France"
+    assert jobs[1].work_type == "remote"  # telecommuting=true
 
 
 # ---------------------------------------------------------------------------
@@ -424,3 +548,50 @@ def test_manual_social_lead_linkedin_has_no_auto_fetch():
     assert out["job_posted_at"] is None
     assert out["recorded_by"] == "operator-manual"
     assert out["date_reliability"] == "post_date_only"
+
+
+def test_check_active_custom_404_is_closed_not_error():
+    """404 custom = halaman hilang -> False (boleh jadi closed)."""
+    from scraper_core.base import SourceFetchError
+
+    adapter = CareerPageAdapter(
+        "Contoh Corp", "https://careers.contohcorp.id",
+        fetcher=FakeFetcher({}), polite_delay=0)
+    assert adapter.check_active("https://careers.contohcorp.id/sudah-tutup") is False
+
+
+def test_check_active_custom_500_raises_fetch_error():
+    """500 custom = gagal teknis -> SourceFetchError (worker -> unknown)."""
+    from scraper_core.base import SourceFetchError
+
+    adapter = CareerPageAdapter(
+        "Contoh Corp", "https://careers.contohcorp.id",
+        fetcher=FakeFetcher({
+            "https://careers.contohcorp.id/mobile-engineer": (500, b"error"),
+        }), polite_delay=0)
+    with pytest.raises(SourceFetchError):
+        adapter.check_active("https://careers.contohcorp.id/mobile-engineer")
+
+
+def test_check_active_custom_no_json_ld_raises_fetch_error():
+    """Halaman 200 tanpa JSON-LD = gagal parse -> SourceFetchError."""
+    from scraper_core.base import SourceFetchError
+
+    adapter = CareerPageAdapter(
+        "Contoh Corp", "https://careers.contohcorp.id",
+        fetcher=FakeFetcher({
+            "https://careers.contohcorp.id/polos": (200, b"<html><body>hi</body></html>"),
+        }), polite_delay=0)
+    with pytest.raises(SourceFetchError):
+        adapter.check_active("https://careers.contohcorp.id/polos")
+
+
+def test_check_active_board_unparseable_raises_fetch_error():
+    """Board ATS yang tidak bisa dibaca -> SourceFetchError (bukan False)."""
+    from scraper_core.base import SourceFetchError
+
+    adapter = CareerPageAdapter(
+        "Contoh", "https://contoh.wd1.myworkdayjobs.com/External",
+        fetcher=FakeFetcher({}), polite_delay=0)
+    with pytest.raises(SourceFetchError):
+        adapter.check_active("https://contoh.wd1.myworkdayjobs.com/External/abc")

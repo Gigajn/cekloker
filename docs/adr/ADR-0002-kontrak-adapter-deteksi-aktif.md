@@ -150,3 +150,16 @@ dependensi runtime = image Docker kecil + tanpa rantai pasok.
   aturan "job lama jadi `unknown`, bukan `closed`".
 - **G5** menguji stdlib-only dan justru menguatkannya (bukan mengubah).
   Lihat `docs/fase1-riset-jobboard.md` §4.
+
+## Amandemen koordinator Fase 1-lanjutan (15 Nov 2026) — check_active
+
+`CareerPageAdapter.check_active` sempat mengembalikan `False` untuk
+kegagalan teknis (board tidak bisa dibaca / halaman tidak bisa diparse),
+yang setelah 2x kunjungan akan menandai lowongan aktif sebagai `closed`
+— melanggar aturan "gagal teknis ≠ tutup" di ADR ini. Perbaikan:
+kegagalan teknis kini melempar `SourceFetchError` (worker → `unknown`);
+hanya HTTP 404 / lowongan benar-benar tidak ada di board yang berarti
+`False`. Test baru: `test_check_active_custom_404_is_closed_not_error`,
+`test_check_active_custom_500_raises_fetch_error`,
+`test_check_active_custom_no_json_ld_raises_fetch_error`,
+`test_check_active_board_unparseable_raises_fetch_error`.

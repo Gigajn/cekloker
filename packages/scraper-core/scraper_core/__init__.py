@@ -8,6 +8,7 @@ from .base import (
     SourceNotPermittedError,
     allowed_by_robots,
     fetch_text,
+    job_fingerprint,
     polite_delay,
     user_agent,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "SourceNotPermittedError",
     "allowed_by_robots",
     "fetch_text",
+    "job_fingerprint",
     "polite_delay",
     "user_agent",
     "normalize_company",

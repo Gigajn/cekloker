@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<!-- FIXTURE — dimodelkan dari halaman detail Glints live 15 Nov 2026
+     (Corporate Sales Executive, datePosted 2026-08-27, validThrough
+     2026-12-16, gaji Rp5–5,5 jt). BUKAN salinan mentah halaman asli:
+     hanya struktur yang relevan untuk regresi uji live:
+     (1) JSON-LD JobPosting LENGKAP dengan validThrough,
+     (2) bundel i18n di dalam <script> yang memuat pesan
+         "lowongan ini sudah ditutup" untuk SEMUA halaman,
+     (3) badan tampil TANPA pemberitahuan tutup.
+     Lowongan ini AKTIF (validThrough di masa depan) — adapter versi
+     lama salah menandainya tutup karena mencari penanda di HTML mentah. -->
+<html lang="id">
+<head>
+  <title>Corporate Sales Executive Jobs at PT. AME KUNINGAN JAYA | Glints</title>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "JobPosting",
+    "title": "Corporate Sales Executive",
+    "description": "Menjual produk ke pelanggan korporat.",
+    "datePosted": "2026-08-27T03:33:51.59Z",
+    "validThrough": "2026-12-16",
+    "employmentType": "FULL_TIME",
+    "directApply": true,
+    "hiringOrganization": {"@type": "Organization", "name": "PT. AME KUNINGAN JAYA"},
+    "jobLocation": {"@type": "Place", "address": {"addressLocality": "Jakarta Selatan"}},
+    "baseSalary": {"@type": "MonetaryAmount", "currency": "IDR",
+      "value": {"@type": "QuantitativeValue", "minValue": 5000000, "maxValue": 5500000, "unitText": "MONTH"}}
+  }
+  </script>
+  <script>
+  window.__I18N__ = {"job.card.job.closed.message":"lowongan ini sudah ditutup","job.apply.external":"lamar"};
+  </script>
+</head>
+<body>
+  <h1>Corporate Sales Executive</h1>
+  <p>PT. AME KUNINGAN JAYA</p>
+  <p>Jakarta Selatan</p>
+  <p>Posted 2 months ago</p>
+  <button>Lamar</button>
+</body>
+</html>

@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Optional
 
+from .parsers import normalize_company
+
 # ---------------------------------------------------------------------------
 # Error
 # ---------------------------------------------------------------------------
@@ -47,6 +49,45 @@ class SourceBlockedError(RuntimeError):
 
 class SourceFetchError(RuntimeError):
     """Gagal ambil halaman karena alasan teknis (timeout, 5xx, dst)."""
+
+
+# ---------------------------------------------------------------------------
+# Fingerprint dedup — SATU-SATUNYA definisi (K8, Fase 1-lanjutan)
+# ---------------------------------------------------------------------------
+
+
+def job_fingerprint(title: str, company: Optional[str],
+                    location: Optional[str]) -> str:
+    """Fingerprint dedup lintas sumber: hash(judul + perusahaan + lokasi).
+
+    Definisi TUNGGAL yang dipakai semua adapter dan ``RawJob.fingerprint()``
+    (konflik K8 Fase 1: dulu ada dua definisi — satu memakai nama perusahaan
+    mentah, satu memakai ``company_norm`` — kini disamakan ke yang ini):
+
+    - perusahaan dinormalisasi dulu lewat ``normalize_company`` (buang
+      imbuhan badan hukum "PT"/"Tbk"/"CV"/"Ltd", rapikan spasi, seragamkan
+      kapital), jadi "PT Contoh Corp", "Contoh Corp Tbk", dan "contoh corp"
+      menghasilkan fingerprint yang sama;
+    - judul + lokasi hanya di-strip + lower;
+    - hasil: SHA-256, 32 karakter hex pertama;
+    - URL sengaja TIDAK masuk fingerprint — justru supaya repost (URL/ID
+      baru, isi sama) terdeteksi sebagai lowongan yang sama.
+
+    Batasan yang jujur (grill K8): dua lowongan BENAR-BENAR berbeda dengan
+    judul + perusahaan + lokasi yang sama persis (mis. perusahaan membuka
+    2 posisi "Staff Administrasi" di Jakarta) akan berbagi fingerprint.
+    Karena itu fingerprint hanya sinyal kandidat dedup/repost, bukan
+    identitas tunggal — normalizer wajib mengonfirmasi dengan field lain
+    (``job_key``/``platform_job_id``/``posted_at``) sebelum menggabungkan.
+    """
+    key = "|".join(
+        [
+            (title or "").strip().lower(),
+            normalize_company(company or "").strip().lower(),
+            (location or "").strip().lower(),
+        ]
+    )
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
 
 
 # ---------------------------------------------------------------------------
@@ -90,17 +131,14 @@ class RawJob:
     fetched_at: datetime = field(default_factory=datetime.now)
 
     def fingerprint(self) -> str:
-        """Hash dedup antar-sumber: judul + perusahaan ternormalisasi
-        + lokasi. Dipakai normalizer untuk mendeteksi lowongan yang
-        sama tayang di 2 sumber, DAN repost (URL baru, isi sama)."""
-        key = "|".join(
-            [
-                self.title.strip().lower(),
-                self.company_norm.strip().lower(),
-                self.location.strip().lower(),
-            ]
-        )
-        return hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+        """Hash dedup antar-sumber — delegasi ke ``job_fingerprint()``
+        (definisi tunggal, lihat K8 di atas). Dipakai normalizer untuk
+        mendeteksi lowongan yang sama tayang di 2 sumber, DAN repost
+        (URL baru, isi sama). ``company_norm`` dinormalisasi ulang di
+        dalam ``job_fingerprint`` (idempotent untuk nilai yang sudah
+        ternormalisasi), jadi hasilnya sama walau pemanggil mengisi
+        ``company_norm`` dari nama mentah."""
+        return job_fingerprint(self.title, self.company_norm, self.location)
 
 
 # ---------------------------------------------------------------------------
